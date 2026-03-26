@@ -7,7 +7,7 @@ description: "Runs an autonomous Copilot review loop on a PR in the background �
 
 Autonomous Copilot code review loop. Requests review, classifies comments by severity with project-context awareness, fixes code, resolves threads, re-requests review, and repeats.
 
-**This skill runs as a background agent in a git worktree** so the user can keep working. Spawn this as a background agent immediately after parsing the PR.
+**This skill runs in a git worktree** for isolation. It can run as a background agent if auto-mode is enabled (`"defaultMode": "auto"` in settings — requires a fresh session to take effect). Otherwise, run in the foreground — the loop is fully autonomous either way.
 
 **Exit conditions:**
 - **Clean pass**: Copilot reports "generated no new comments"
