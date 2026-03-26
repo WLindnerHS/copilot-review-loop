@@ -18,11 +18,9 @@ teardown() {
   run "$SCRIPT_DIR/worktree.sh" create test-branch 42
   [ "$status" -eq 0 ]
 
-  # Worktree should exist (check TEMP or /tmp)
-  local expected_path="${TEMP:-/tmp}/copilot-review-42"
+  local expected_path="${TMPDIR:-${TEMP:-/tmp}}/copilot-review-42"
   [ -d "$expected_path" ]
 
-  # Should appear in git worktree list
   git worktree list | grep -q "copilot-review-42"
 }
 
@@ -31,7 +29,7 @@ teardown() {
   run "$SCRIPT_DIR/worktree.sh" create test-branch 42
   [ "$status" -eq 0 ]
 
-  local expected_path="${TEMP:-/tmp}/copilot-review-42"
+  local expected_path="${TMPDIR:-${TEMP:-/tmp}}/copilot-review-42"
   [[ "$output" == *"$expected_path"* ]]
 }
 
@@ -42,19 +40,20 @@ teardown() {
   [[ "$output" == *"does not exist"* ]] || [[ "$output" == *"not a valid"* ]] || [[ "$output" == *"invalid reference"* ]]
 }
 
-@test "create: fails if branch is already checked out" {
+@test "create: works when branch is already checked out (detached HEAD)" {
   cd "$TEST_REPO_DIR"
   git checkout test-branch
   run "$SCRIPT_DIR/worktree.sh" create test-branch 42
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"already checked out"* ]]
+  [ "$status" -eq 0 ]
+
+  local expected_path="${TMPDIR:-${TEMP:-/tmp}}/copilot-review-42"
+  [ -d "$expected_path" ]
 }
 
 @test "create: cleans up stale worktree if path already exists" {
   cd "$TEST_REPO_DIR"
-  # Create first worktree
   "$SCRIPT_DIR/worktree.sh" create test-branch 42
-  local wt_path="${TEMP:-/tmp}/copilot-review-42"
+  local wt_path="${TMPDIR:-${TEMP:-/tmp}}/copilot-review-42"
 
   # Simulate a stale worktree: remove git's tracking but leave the directory
   git worktree remove --force "$wt_path"
@@ -79,6 +78,13 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
+@test "create: fails with non-numeric pr_num" {
+  cd "$TEST_REPO_DIR"
+  run "$SCRIPT_DIR/worktree.sh" create test-branch "../escape"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"positive integer"* ]]
+}
+
 @test "fails with no command" {
   run "$SCRIPT_DIR/worktree.sh"
   [ "$status" -ne 0 ]
@@ -90,7 +96,7 @@ teardown() {
 @test "remove: removes an existing worktree" {
   cd "$TEST_REPO_DIR"
   "$SCRIPT_DIR/worktree.sh" create test-branch 42
-  local wt_path="${TEMP:-/tmp}/copilot-review-42"
+  local wt_path="${TMPDIR:-${TEMP:-/tmp}}/copilot-review-42"
   [ -d "$wt_path" ]
 
   run "$SCRIPT_DIR/worktree.sh" remove 42
@@ -111,4 +117,11 @@ teardown() {
   run "$SCRIPT_DIR/worktree.sh" remove
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage"* ]]
+}
+
+@test "remove: fails with non-numeric pr_num" {
+  cd "$TEST_REPO_DIR"
+  run "$SCRIPT_DIR/worktree.sh" remove "../escape"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"positive integer"* ]]
 }

@@ -30,7 +30,7 @@ gh auth status
 
 If `gh` version is below 2.88.0, tell the user to upgrade via their package manager (e.g., `winget upgrade --id GitHub.cli`, `brew upgrade gh`, or download from https://cli.github.com).
 
-**IMPORTANT**: The repository must have "Review new pushes" enabled in the Copilot code review ruleset (Settings > Rules > Rulesets > Copilot code review > Review new pushes). Without this, pushes will not trigger automatic Copilot re-review and the loop will time out after the first cycle.
+**RECOMMENDED**: Enable "Review new pushes" in the Copilot code review ruleset (Settings > Rules > Rulesets > Copilot code review > Review new pushes) for automatic re-review on push. If not enabled, the skill uses an API workaround (add/remove/add reviewer) to trigger re-reviews programmatically.
 
 ## Step 1: Parse the PR
 
@@ -39,11 +39,11 @@ If the user provides a PR number (from args or natural language), use it directl
 Otherwise, auto-detect from the current branch:
 
 ```bash
-gh pr view --json number,headRefName,headRepository -q '{
+gh pr view --json number,headRefName,baseRepository -q '{
   number: .number,
   branch: .headRefName,
-  owner: .headRepository.owner.login,
-  repo: .headRepository.name
+  owner: .baseRepository.owner.login,
+  repo: .baseRepository.name
 }'
 ```
 
@@ -63,14 +63,22 @@ If a worktree already exists for this PR, report: "A copilot review loop is alre
 
 **Spawn this as a background agent now.** The user should get their terminal back immediately.
 
-Create the worktree using the companion script. The script lives at `~/.claude/skills/copilot-review-loop/scripts/worktree.sh`:
+Ensure the PR branch exists locally before creating the worktree:
+
+```bash
+git fetch origin "${BRANCH}" 2>/dev/null || git fetch origin "refs/pull/${PR_NUM}/head"
+```
+
+Create the worktree using the companion script. The worktree is created in **detached HEAD** mode so it works even when the user is currently on the PR branch:
 
 ```bash
 SKILL_DIR="$HOME/.claude/skills/copilot-review-loop"
 "${SKILL_DIR}/scripts/worktree.sh" create "${BRANCH}" "${PR_NUM}"
 ```
 
-The worktree path will be `$TEMP/copilot-review-<PR_NUM>` (Windows) or `/tmp/copilot-review-<PR_NUM>` (Unix).
+**Note**: Because the worktree uses detached HEAD, use `git push origin HEAD:${BRANCH}` instead of plain `git push` when pushing from the worktree.
+
+The worktree path will be `$TMPDIR/copilot-review-<PR_NUM>` (macOS/Linux) or `$TEMP/copilot-review-<PR_NUM>` (Windows), falling back to `/tmp/copilot-review-<PR_NUM>`.
 
 **All subsequent operations run from inside the worktree directory.**
 
@@ -96,8 +104,30 @@ totalDismissed = 0
 ## Step 5: Request Initial Copilot Review
 
 ```bash
-gh pr edit ${PR_NUM} --repo ${OWNER}/${REPO} --add-reviewer "@copilot"
+gh api --method POST "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
 ```
+
+### Re-requesting Copilot Review (after Copilot has already submitted)
+
+GitHub has no official API to re-request a review from a reviewer who already submitted. The workaround is an **add -> remove -> add** sequence:
+
+```bash
+# Step 1: Add Copilot back as pending reviewer (alongside its submitted review)
+gh api --method POST "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
+
+# Step 2: Remove the pending request
+# IMPORTANT: DELETE uses username "Copilot" (not "copilot-pull-request-reviewer[bot]")
+gh api --method DELETE "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=Copilot'
+
+# Step 3: Add again — this triggers a fresh review
+gh api --method POST "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
+```
+
+Use this sequence at the end of each cycle (step 6h) to trigger the next review. If "Review new pushes" is enabled on the repo, the push alone will trigger re-review and this sequence is not needed — but the add/remove/add workaround works regardless of ruleset configuration.
 
 ## Step 6: Main Loop (repeat until exit condition)
 
@@ -126,7 +156,7 @@ gh api graphql -f query='
           }
         }
         commits(last: 1) {
-          nodes { commit { committedDate } }
+          nodes { commit { pushedDate committedDate } }
         }
         reviewThreads(first: 100) {
           nodes {
@@ -154,7 +184,7 @@ gh api graphql -f query='
 ```
 {
   review: latest review node where author.login == "copilot-pull-request-reviewer" (sorted by submittedAt),
-  latestCommit: last commit's committedDate,
+  latestCommit: last commit's pushedDate (preferred) or committedDate (fallback),
   unresolvedThreads: reviewThread nodes where isResolved == false AND first comment's author.login == "copilot-pull-request-reviewer"
 }
 ```
@@ -162,7 +192,7 @@ gh api graphql -f query='
 **Decision logic (in order):**
 
 1. **No Copilot review exists**: Trigger one with `gh pr edit --add-reviewer "@copilot"`, wait for next poll.
-2. **`review.submittedAt` < `latestCommit`**: Copilot hasn't reviewed latest push. Wait.
+2. **`review.submittedAt` < `latestCommit`**: Copilot hasn't reviewed latest push. Wait. Use `pushedDate` (not `committedDate`) for this comparison — `committedDate` is the author timestamp which can be older than the actual push.
 3. **`review.submittedAt` <= `lastSeenReviewAt`**: Re-triggered review hasn't arrived yet. Wait. This prevents the race condition where the loop sees a stale review and falsely concludes there are no comments.
 4. **`review.body` contains "generated no new comments"**: Clean pass. **STOP (clean).**
 5. **`review.body` contains "generated N comments" (N > 0)**: Proceed to classify.
@@ -265,10 +295,10 @@ gh api graphql -f query='
 '
 ```
 
-Then push:
+Then push (detached HEAD requires explicit refspec):
 
 ```bash
-git push
+git push origin HEAD:${BRANCH}
 ```
 
 **Push failure handling:**
@@ -287,7 +317,18 @@ Report to terminal:
 [copilot-review-loop] Cycle N/7 complete -- fixed X criticals, Y moderates | Z criticals, W moderates remaining
 ```
 
-**Loop continues to next cycle.** The push triggers automatic Copilot re-review (via "Review new pushes" ruleset).
+**Re-request Copilot review** using the add/remove/add workaround from Step 5:
+
+```bash
+gh api --method POST "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
+gh api --method DELETE "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=Copilot'
+gh api --method POST "repos/${OWNER}/${REPO}/pulls/${PR_NUM}/requested_reviewers" \
+  -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
+```
+
+**Loop continues to next cycle.**
 
 ## Step 7: Post Summary and Cleanup
 

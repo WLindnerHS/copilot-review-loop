@@ -13,8 +13,14 @@ if [ -z "$pr_num" ]; then
   exit 1
 fi
 
+# Validate pr_num is strictly numeric
+if ! [[ "$pr_num" =~ ^[0-9]+$ ]]; then
+  echo "Error: pr_num must be a positive integer, got '$pr_num'" >&2
+  exit 1
+fi
+
 # Read body from stdin into a temp file so we can check if it's empty
-body_file="$(mktemp)"
+body_file="$(mktemp "${TMPDIR:-${TEMP:-/tmp}}/copilot-review-loop.XXXXXX")"
 trap 'rm -f "$body_file"' EXIT
 cat > "$body_file"
 
