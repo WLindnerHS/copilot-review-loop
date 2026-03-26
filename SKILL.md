@@ -21,14 +21,11 @@ Autonomous Copilot code review loop. Requests review, classifies comments by sev
 Before starting, verify:
 
 ```bash
-# gh CLI must be v2.88.0+ (for --add-reviewer @copilot support, added in this version)
-gh --version
-
 # Must be authenticated
 gh auth status
 ```
 
-If `gh` version is below 2.88.0, tell the user to upgrade via their package manager (e.g., `winget upgrade --id GitHub.cli`, `brew upgrade gh`, or download from https://cli.github.com).
+Note: This skill uses the GitHub REST API directly (`gh api`) to request and re-request Copilot reviews. It does NOT require `gh` v2.88.0+ or `gh pr edit --add-reviewer`.
 
 **RECOMMENDED**: Enable "Review new pushes" in the Copilot code review ruleset (Settings > Rules > Rulesets > Copilot code review > Review new pushes) for automatic re-review on push. If not enabled, the skill uses an API workaround (add/remove/add reviewer) to trigger re-reviews programmatically.
 
