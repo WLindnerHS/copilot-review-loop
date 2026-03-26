@@ -25,7 +25,7 @@ Runs in a **git worktree in the background** so you can keep working on other th
 ### Option 1: Symlink (recommended for development)
 
 ```bash
-git clone https://github.com/WLindnerHS/copilot-review-loop.git ~/copilot-review-loop
+git clone https://github.com/homestoryrealestate/copilot-review-loop.git ~/copilot-review-loop
 
 # macOS/Linux
 ln -s ~/copilot-review-loop ~/.claude/skills/copilot-review-loop
@@ -37,7 +37,7 @@ mklink /J "%USERPROFILE%\.claude\skills\copilot-review-loop" "%USERPROFILE%\copi
 ### Option 2: Direct clone into skills
 
 ```bash
-git clone https://github.com/WLindnerHS/copilot-review-loop.git ~/.claude/skills/copilot-review-loop
+git clone https://github.com/homestoryrealestate/copilot-review-loop.git ~/.claude/skills/copilot-review-loop
 ```
 
 ## Prerequisites
