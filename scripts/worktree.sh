@@ -54,8 +54,23 @@ cmd_create() {
 }
 
 cmd_remove() {
-  echo "Error: remove not implemented yet" >&2
-  exit 1
+  local pr_num="${1:-}"
+
+  if [ -z "$pr_num" ]; then
+    echo "Usage: worktree.sh remove <pr_num>" >&2
+    exit 1
+  fi
+
+  local wt_path
+  wt_path="$(get_worktree_path "$pr_num")"
+
+  if [ -d "$wt_path" ]; then
+    git worktree remove --force "$wt_path" 2>/dev/null || true
+    rm -rf "$wt_path" 2>/dev/null || true
+    echo "Removed worktree at $wt_path"
+  else
+    echo "No worktree found at $wt_path"
+  fi
 }
 
 # Main dispatch

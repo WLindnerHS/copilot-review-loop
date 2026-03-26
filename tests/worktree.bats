@@ -84,3 +84,31 @@ teardown() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage"* ]]
 }
+
+# --- remove command ---
+
+@test "remove: removes an existing worktree" {
+  cd "$TEST_REPO_DIR"
+  "$SCRIPT_DIR/worktree.sh" create test-branch 42
+  local wt_path="${TEMP:-/tmp}/copilot-review-42"
+  [ -d "$wt_path" ]
+
+  run "$SCRIPT_DIR/worktree.sh" remove 42
+  [ "$status" -eq 0 ]
+  [ ! -d "$wt_path" ]
+  ! git worktree list | grep -q "copilot-review-42"
+}
+
+@test "remove: succeeds even if worktree doesn't exist" {
+  cd "$TEST_REPO_DIR"
+  run "$SCRIPT_DIR/worktree.sh" remove 999
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No worktree found"* ]]
+}
+
+@test "remove: fails with no arguments" {
+  cd "$TEST_REPO_DIR"
+  run "$SCRIPT_DIR/worktree.sh" remove
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage"* ]]
+}
