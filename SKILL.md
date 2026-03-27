@@ -7,7 +7,17 @@ description: "Runs an autonomous Copilot review loop on a PR in the background �
 
 Autonomous Copilot code review loop. Requests review, classifies comments by severity with project-context awareness, fixes code, resolves threads, re-requests review, and repeats.
 
-**This skill runs in a git worktree** for isolation. It can run as a background agent if auto-mode is enabled (`"defaultMode": "auto"` in settings — requires a fresh session to take effect). Otherwise, run in the foreground — the loop is fully autonomous either way.
+**This skill runs in a git worktree** for isolation. **Always launch as a background agent** so the user gets their terminal back immediately.
+
+When spawning the agent, use:
+```
+Agent(
+  run_in_background: true,
+  name: "copilot-review-<PR_NUM>"
+)
+```
+
+**Permission model:** Background agents inherit the parent session's permission settings. When the user is running in **auto mode**, the background agent will also run in auto mode — no tool calls will be blocked. If the user is NOT in auto mode, Bash/Edit/Write calls may require approval, which can cause the background agent to stall. In that case, recommend the user enable auto mode before launching (`/auto`) or run the skill in the foreground.
 
 **Exit conditions:**
 - **Clean pass**: Copilot reports "generated no new comments"
@@ -58,7 +68,7 @@ If a worktree already exists for this PR, report: "A copilot review loop is alre
 
 ## Step 3: Create Worktree and Enter Background
 
-**Spawn this as a background agent now.** The user should get their terminal back immediately.
+**Spawn this as a background agent now** using `Agent(run_in_background: true)`. The user should get their terminal back immediately.
 
 Ensure the PR branch exists locally before creating the worktree:
 
