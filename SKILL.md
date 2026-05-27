@@ -61,8 +61,10 @@ If no PR found, ask the user for the PR number.
 ## Step 2: Concurrency Guard
 
 ```bash
-git worktree list | grep "copilot-review-${PR_NUM}"
+git worktree list | grep -F "copilot-review-${PR_NUM} "
 ```
+
+The trailing space prevents false positives (e.g., PR 1 matching `copilot-review-10`).
 
 If a worktree already exists for this PR, report: "A copilot review loop is already running for PR #N. Wait for it to finish or remove the stale worktree." and stop.
 
@@ -73,8 +75,10 @@ If a worktree already exists for this PR, report: "A copilot review loop is alre
 Ensure the PR branch exists locally before creating the worktree:
 
 ```bash
-git fetch origin "${BRANCH}" 2>/dev/null || git fetch origin "refs/pull/${PR_NUM}/head"
+git fetch origin "${BRANCH}:${BRANCH}" 2>/dev/null || git fetch origin "refs/pull/${PR_NUM}/head:${BRANCH}"
 ```
+
+This creates a local ref so `worktree.sh` can verify it. If the local branch already exists (e.g., user is on it), the fetch may fail — that's fine, the ref already exists.
 
 Create the worktree using the companion script. The worktree is created in **detached HEAD** mode so it works even when the user is currently on the PR branch:
 
@@ -89,11 +93,13 @@ The worktree path will be `$TMPDIR/copilot-review-<PR_NUM>` (macOS/Linux) or `$T
 
 **All subsequent operations run from inside the worktree directory.**
 
-Set up a trap to ensure cleanup on any exit:
+Set up a trap to ensure cleanup on any exit. The `remove` command in `worktree.sh` kills any processes still running inside the worktree (orphaned test runners, node workers, etc.) before deleting:
 
 ```bash
 trap '"${SKILL_DIR}/scripts/worktree.sh" remove "${PR_NUM}"' EXIT
 ```
+
+**Note on Windows:** Bash EXIT traps may not fire if the parent Claude Code process is killed. The `worktree.sh remove` command handles this by killing orphaned processes when it runs — including on the next invocation's stale worktree check (step 2) or when the concurrency guard detects an existing worktree.
 
 ## Step 4: Initialize Loop State
 
@@ -145,19 +151,20 @@ while cycle < maxCycles:
 
 ### 6a: Poll for Copilot Review Completion
 
-Query every 15 seconds. Timeout after 5 minutes (20 polls). If Copilot hasn't responded after 5 minutes, post a PR comment reporting the timeout, report to terminal, cleanup worktree, and **EXIT LOOP** (bail).
+Query every 30 seconds. Timeout after 5 minutes (10 polls). If Copilot hasn't responded after 5 minutes, post a PR comment reporting the timeout, report to terminal, cleanup worktree, and **EXIT LOOP** (bail). (30s, not 15s: Copilot reviews take minutes, so a tighter interval only doubles the number of response dumps accumulated in context while waiting.)
 
 **IMPORTANT -- Copilot author login**: In GraphQL, Copilot's author login is `"copilot-pull-request-reviewer"` (NOT `"copilot"` or `"Copilot"` -- those are REST API values). Always filter by this exact string.
 
+**Token note:** pipe every `gh api` / `gh pr` call in this skill through `rtk` (e.g. `rtk gh api graphql ...`, `rtk gh pr view ...`) so the JSON response is compacted before it reaches context. `rtk` passes the command through unchanged if no filter applies, so it is always safe. The poll query below is also deliberately field-narrow — fetch only what the decision logic reads.
+
 ```bash
-gh api graphql -f query='
+rtk gh api graphql -f query='
   query($owner: String!, $repo: String!, $pr: Int!) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $pr) {
-        reviews(last: 20) {
+        reviews(last: 5) {
           nodes {
             author { login }
-            state
             submittedAt
             body
           }
@@ -165,11 +172,11 @@ gh api graphql -f query='
         commits(last: 1) {
           nodes { commit { pushedDate committedDate } }
         }
-        reviewThreads(first: 100) {
+        reviewThreads(first: 50) {
           nodes {
             id
             isResolved
-            comments(first: 10) {
+            comments(first: 3) {
               nodes {
                 body
                 author { login }
@@ -186,6 +193,8 @@ gh api graphql -f query='
 ' -F owner="${OWNER}" -F repo="${REPO}" -F pr="${PR_NUM}"
 ```
 
+Field/cap notes (keep these tight — every poll re-fetches this): `reviews(last: 5)` is plenty (we only need the latest Copilot review); `state` is omitted (only `submittedAt`/`body` drive the decision logic); `comments(first: 3)` covers Copilot threads (the first comment is the finding). Raise a cap only if a real PR exceeds it.
+
 **Filter the response**: Extract only reviews and threads where `author.login == "copilot-pull-request-reviewer"`. Ignore all other reviewers.
 
 ```
@@ -198,7 +207,7 @@ gh api graphql -f query='
 
 **Decision logic (in order):**
 
-1. **No Copilot review exists**: Trigger one with `gh pr edit --add-reviewer "@copilot"`, wait for next poll.
+1. **No Copilot review exists**: Trigger one via REST API (same as Step 5), wait for next poll.
 2. **`review.submittedAt` < `latestCommit`**: Copilot hasn't reviewed latest push. Wait. Use `pushedDate` (not `committedDate`) for this comparison — `committedDate` is the author timestamp which can be older than the actual push.
 3. **`review.submittedAt` <= `lastSeenReviewAt`**: Re-triggered review hasn't arrived yet. Wait. This prevents the race condition where the loop sees a stale review and falsely concludes there are no comments.
 4. **`review.body` contains "generated no new comments"**: Clean pass. **STOP (clean).**
@@ -221,7 +230,7 @@ For each classified comment, read:
 - Direct callers of the flagged function (1 level up)
 - Relevant CLAUDE.md conventions and project patterns
 
-**Do NOT scan**: entire codebase, transitive callers, unrelated files. Keep evaluation scope tight to control token usage.
+**Do NOT scan**: entire codebase, transitive callers, unrelated files. Keep evaluation scope tight to control token usage. When reading the flagged file, read only the relevant range (use the Read tool's offset/limit or `rtk read <file>`) rather than dumping whole files into context.
 
 Evaluate whether the concern is actually valid in this project's context. Downgrade or dismiss comments that are not applicable. Examples:
 - "Missing error handling" but caught upstream -> NITPICK or skip
@@ -275,7 +284,38 @@ Detect test command (in order):
 5. Go project -> `go test ./...`
 6. If nothing found, skip and note in report
 
-Run with 5-minute timeout.
+**Wrap the test command in `rtk`** so only failures reach context — a green full suite otherwise dumps hundreds of passing-test lines every cycle, which is the single largest source of context growth in this loop. `rtk` has dedicated failures-only filters: `rtk test <cmd>` (generic), `rtk vitest run`, `rtk pytest`, `rtk playwright test`. It passes the command through unchanged if no filter matches, so it is always safe; map the detected runner to the matching `rtk` subcommand (`vitest` -> `rtk vitest run`, `jest`/`npm test` -> `rtk test npm test`, `pytest` -> `rtk pytest`, otherwise `rtk test <cmd>`).
+
+Run with 5-minute timeout. **Use `timeout` (or PowerShell `Start-Process -Wait`) to enforce this — do not rely on the test runner's own timeout.** If the timeout is hit, kill the test process tree before proceeding:
+
+```bash
+# Unix — rtk wraps the runner; failures-only output
+timeout 300 rtk test npm test || true
+
+# Windows (Git Bash): timeout may not kill children; use PowerShell wrapper.
+# Still wrap the inner runner in rtk for failures-only output.
+if command -v powershell.exe > /dev/null 2>&1; then
+  powershell.exe -Command "
+    \$proc = Start-Process -FilePath 'rtk' -ArgumentList 'test','npm','test' -NoNewWindow -PassThru
+    if (-not \$proc.WaitForExit(300000)) {
+      \$proc | Stop-Process -Force -ErrorAction SilentlyContinue
+      Get-Process node -ErrorAction SilentlyContinue |
+        Where-Object { \$_.StartInfo.Arguments -like '*jest*' -or \$_.StartInfo.Arguments -like '*vitest*' } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+      Write-Host 'Tests timed out — killed'
+    }
+    exit \$proc.ExitCode
+  " 2>&1 || true
+fi
+```
+
+**Test-runner specifics by framework:**
+
+- **Vitest**: `rtk vitest run` (failures-only). If you see "Worker exited unexpectedly" on Windows (memory pressure), fall back to `rtk vitest run --pool=forks --poolOptions.forks.singleFork=true`. Scoped runs (`rtk vitest run path/to/file`) typically work without the override. `--forceExit` does NOT exist for Vitest (Jest-only).
+- **Jest**: `rtk test npm test` (or wrap the jest invocation). Pass `--forceExit` to the underlying jest to prevent hanging workers (the PowerShell wrapper kills stragglers as a backstop).
+- **pytest / go test**: `rtk pytest` / `rtk test go test ./...` — no extra flag needed.
+
+Detect runner from `package.json`'s `test` script or the deps before choosing the `rtk` subcommand and flags.
 
 **On failure:** Attempt 1 fix. If fix conflicts with Copilot suggestion, revert that suggestion (mark skipped). Re-run. If still failing, revert all cycle changes with `git checkout .` and bail with report.
 
@@ -357,7 +397,7 @@ Worktree cleanup happens automatically via the EXIT trap.
 
 - **Network/API failures**: Retry up to 2 times with 10s delay. If still failing, bail and report the error.
 - **Auth token expiration**: If `gh auth status` fails mid-loop, bail and report "GitHub authentication expired. Re-authenticate and restart."
-- **Worktree cleanup failure** (locked files on Windows): Report stale worktree path for manual cleanup.
+- **Worktree cleanup failure** (locked files on Windows): The worktree removal script now kills processes referencing the worktree before deleting. If cleanup still fails, report the stale worktree path and the PIDs that couldn't be killed.
 
 ## PR Comment Templates
 
